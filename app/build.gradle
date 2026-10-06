@@ -1,0 +1,39 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.example.drawingsarchive'
+    compileSdk 37
+
+    defaultConfig {
+        applicationId 'com.example.drawingsarchive'
+        minSdk 26
+        targetSdk 37
+        versionCode 10
+        versionName '2.2'
+    }
+
+    signingConfigs {
+        debugLocal {
+            storeFile rootProject.file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug { signingConfig signingConfigs.debugLocal }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.activity:activity:1.8.0'
+    implementation 'com.google.android.gms:play-services-mlkit-document-scanner:16.0.0'
+}

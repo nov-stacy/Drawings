@@ -1,10 +1,9 @@
 package com.example.drawingsarchive;
 
-import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentSender;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
@@ -20,7 +19,6 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.provider.MediaStore;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -43,14 +41,22 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.ComponentActivity;
+import androidx.activity.OnBackPressedCallback;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
+
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions;
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning;
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -58,21 +64,23 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-public class MainActivity extends Activity {
+public class MainActivity extends ComponentActivity {
     private static final int REQUEST_IMAGE = 1201;
-    private static final int REQUEST_CAMERA = 1202;
+    private static final int REQUEST_DOCUMENT_SCAN = 1202;
+    private static final int REQUEST_BACKUP_FOLDER = 1301;
     private static final String PREFS = "drawings_archive";
     private static final String KEY_ARTWORKS = "artworks";
     private static final String KEY_MATERIALS = "materials";
+    private static final String KEY_MATERIALS_FULL = "materials_full";
 
-    private final int COLOR_BG = Color.parseColor("#FFF8F5");
-    private final int COLOR_SURFACE = Color.parseColor("#FFFDFB");
-    private final int COLOR_SURFACE_2 = Color.parseColor("#F6EBE6");
-    private final int COLOR_PRIMARY = Color.parseColor("#8D4F3A");
-    private final int COLOR_PRIMARY_SOFT = Color.parseColor("#FFDBCE");
-    private final int COLOR_TEXT = Color.parseColor("#241915");
-    private final int COLOR_MUTED = Color.parseColor("#786762");
-    private final int COLOR_OUTLINE = Color.parseColor("#D9C5BD");
+    private final int COLOR_BG = Color.parseColor("#FCF9F4");
+    private final int COLOR_SURFACE = Color.parseColor("#FFFFFF");
+    private final int COLOR_SURFACE_2 = Color.parseColor("#F1EEEA");
+    private final int COLOR_PRIMARY = Color.parseColor("#C66F55");
+    private final int COLOR_PRIMARY_SOFT = Color.parseColor("#C66F55");
+    private final int COLOR_TEXT = Color.parseColor("#151412");
+    private final int COLOR_MUTED = Color.parseColor("#77736F");
+    private final int COLOR_OUTLINE = Color.parseColor("#D8D2CC");
 
     private final ArrayList<Artwork> artworks = new ArrayList<>();
     private final ArrayList<String> materials = new ArrayList<>();
@@ -82,11 +90,11 @@ public class MainActivity extends Activity {
     private SharedPreferences preferences;
     private FrameLayout pageRoot;
     private Uri pendingImageUri;
-    private Uri pendingCameraUri;
     private ImageView pendingPreview;
     private TextView pendingPreviewHint;
     private final ArrayList<String> selectedArtworkMaterials = new ArrayList<>();
     private String searchQuery = "";
+    private String currentScreen = "home";
 
     private Bitmap editorSourceBitmap;
     private ImageView editorPreview;
@@ -101,7 +109,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(COLOR_BG);
-        getWindow().setNavigationBarColor(COLOR_SURFACE_2);
+        getWindow().setNavigationBarColor(COLOR_BG);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             WindowManager.LayoutParams attributes = getWindow().getAttributes();
@@ -110,14 +118,29 @@ public class MainActivity extends Activity {
         }
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         loadData();
+        DrawingBackup.schedule(this);
+        new Thread(() -> DrawingBackup.writeIfDue(this, () -> false), "drawing-backup-check").start();
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (!"home".equals(currentScreen)) {
+                    showHome();
+                    return;
+                }
+                setEnabled(false);
+                getOnBackPressedDispatcher().onBackPressed();
+            }
+        });
         showHome();
     }
 
     private void loadData() {
         materials.clear();
-        materials.addAll(Arrays.asList("Акварель", "Карандаш", "Маркеры"));
+        boolean hasFullList = preferences.contains(KEY_MATERIALS_FULL);
+        if (!hasFullList) materials.addAll(Arrays.asList("Карандаш", "Акварель", "Маркеры"));
         try {
-            JSONArray storedMaterials = new JSONArray(preferences.getString(KEY_MATERIALS, "[]"));
+            String stored = preferences.getString(hasFullList ? KEY_MATERIALS_FULL : KEY_MATERIALS, "[]");
+            JSONArray storedMaterials = new JSONArray(stored);
             for (int i = 0; i < storedMaterials.length(); i++) {
                 String material = storedMaterials.optString(i, "").trim();
                 if (!material.isEmpty() && !material.equals("Другое") && !materials.contains(material)) {
@@ -160,14 +183,12 @@ public class MainActivity extends Activity {
 
         JSONArray materialArray = new JSONArray();
         for (String material : materials) {
-            if (!material.equals("Акварель") && !material.equals("Карандаш") && !material.equals("Маркеры")) {
-                materialArray.put(material);
-            }
+            materialArray.put(material);
         }
 
         preferences.edit()
                 .putString(KEY_ARTWORKS, artworkArray.toString())
-                .putString(KEY_MATERIALS, materialArray.toString())
+                .putString(KEY_MATERIALS_FULL, materialArray.toString())
                 .apply();
     }
 
@@ -190,36 +211,27 @@ public class MainActivity extends Activity {
     }
 
     private void showHome() {
+        currentScreen = "home";
         FrameLayout root = newPage();
         LinearLayout content = vertical();
-        content.setPadding(dp(16), dp(12), dp(16), dp(86));
+        content.setPadding(dp(16), dp(10), dp(16), dp(82));
         root.addView(content, match());
 
-        LinearLayout topBar = new LinearLayout(this);
-        topBar.setOrientation(LinearLayout.HORIZONTAL);
-        topBar.setGravity(Gravity.CENTER_VERTICAL);
-        TextView heading = heading("Мои рисунки");
-        topBar.addView(heading, new LinearLayout.LayoutParams(0, dp(58), 1));
-        Button viewButton = textButton("▦", false);
-        viewButton.setTextSize(24);
-        viewButton.setTextColor(COLOR_TEXT);
-        viewButton.setBackgroundColor(Color.TRANSPARENT);
-        viewButton.setContentDescription("Вид коллекции");
-        topBar.addView(viewButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
-        content.addView(topBar, lpMatchWrap());
+        TextView heading = serifHeading("Мои рисунки", 28);
+        content.addView(heading, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
 
         EditText search = new EditText(this);
         search.setSingleLine(true);
         search.setText(searchQuery);
-        search.setHint("Поиск по названию, году…");
+        search.setHint("Поиск");
         search.setHintTextColor(COLOR_MUTED);
         search.setTextColor(COLOR_TEXT);
-        search.setTextSize(16);
-        search.setPadding(dp(18), 0, dp(18), 0);
+        search.setTextSize(14);
+        search.setPadding(dp(13), 0, dp(13), 0);
         search.setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_menu_search, 0, 0, 0);
         search.setCompoundDrawablePadding(dp(10));
-        search.setBackground(rounded(COLOR_SURFACE_2, 28));
-        content.addView(search, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
+        search.setBackground(rounded(COLOR_SURFACE_2, 14));
+        content.addView(search, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(40)));
 
         HorizontalScrollView chipScroll = new HorizontalScrollView(this);
         chipScroll.setHorizontalScrollBarEnabled(false);
@@ -235,15 +247,15 @@ public class MainActivity extends Activity {
         for (String material : materials) {
             Button materialChip = chip(material, selectedMaterialFilters.contains(material));
             materialChip.setOnClickListener(v -> {
-                if (selectedMaterialFilters.contains(material)) selectedMaterialFilters.remove(material);
-                else selectedMaterialFilters.add(material);
+                selectedMaterialFilters.clear();
+                selectedMaterialFilters.add(material);
                 showHome();
             });
             chipRow.addView(materialChip);
         }
-        chipScroll.addView(chipRow, new HorizontalScrollView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)));
-        LinearLayout.LayoutParams chipScrollParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
-        chipScrollParams.topMargin = dp(4);
+        chipScroll.addView(chipRow, new HorizontalScrollView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
+        LinearLayout.LayoutParams chipScrollParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+        chipScrollParams.topMargin = dp(5);
         content.addView(chipScroll, chipScrollParams);
 
         FrameLayout collectionArea = new FrameLayout(this);
@@ -251,14 +263,14 @@ public class MainActivity extends Activity {
 
         GridView grid = new GridView(this);
         grid.setNumColumns(2);
-        grid.setHorizontalSpacing(dp(12));
-        grid.setVerticalSpacing(dp(12));
+        grid.setHorizontalSpacing(dp(10));
+        grid.setVerticalSpacing(dp(10));
         grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
         grid.setClipToPadding(false);
         grid.setPadding(0, 0, 0, dp(16));
         collectionArea.addView(grid, match());
 
-        TextView empty = bodyText("Пока нет рисунков\nНажмите «＋», чтобы добавить первую работу", 16, COLOR_MUTED);
+        TextView empty = bodyText("Пока нет рисунков\nНажмите «＋», чтобы добавить первую работу", 15, COLOR_MUTED);
         empty.setGravity(Gravity.CENTER);
         collectionArea.addView(empty, match());
         grid.setEmptyView(empty);
@@ -277,7 +289,7 @@ public class MainActivity extends Activity {
             @Override public void afterTextChanged(Editable s) { }
         });
 
-        addBottomNavigation(root, "Работы");
+        addBottomNavigation(root, "Коллекция");
         addFloatingButton(root);
     }
 
@@ -329,9 +341,11 @@ public class MainActivity extends Activity {
     }
 
     private void showAddArtwork() {
+        currentScreen = "add";
         pendingImageUri = null;
         selectedArtworkMaterials.clear();
-        if (!materials.isEmpty()) selectedArtworkMaterials.add(materials.get(0));
+        if (materials.contains("Акварель")) selectedArtworkMaterials.add("Акварель");
+        else if (!materials.isEmpty()) selectedArtworkMaterials.add(materials.get(0));
         FrameLayout root = newPage();
 
         ScrollView scroll = new ScrollView(this);
@@ -339,56 +353,74 @@ public class MainActivity extends Activity {
         root.addView(scroll, match());
 
         LinearLayout content = vertical();
-        content.setPadding(dp(18), dp(8), dp(18), dp(28));
+        content.setPadding(dp(18), dp(6), dp(18), dp(28));
         scroll.addView(content, lpMatchWrap());
 
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView back = iconText("×", 28);
-        back.setTranslationY(-dp(6));
+        TextView back = iconText("‹", 34);
         back.setOnClickListener(v -> showHome());
         header.addView(back, new LinearLayout.LayoutParams(dp(44), dp(58)));
-        TextView title = bodyText("Новая работа", 20, COLOR_TEXT);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        TextView title = serifHeading("Новая работа", 23);
+        title.setGravity(Gravity.CENTER);
         header.addView(title, new LinearLayout.LayoutParams(0, dp(58), 1));
         header.addView(new View(this), new LinearLayout.LayoutParams(dp(44), dp(58)));
         content.addView(header, lpMatchWrap());
 
         FrameLayout previewHolder = new FrameLayout(this);
-        previewHolder.setBackground(rounded(COLOR_SURFACE_2, 22));
-        previewHolder.setClipToOutline(true);
-        content.addView(previewHolder, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(188)));
+        previewHolder.setBackground(dashed(COLOR_BG, COLOR_OUTLINE, 12));
+        content.addView(previewHolder, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(292)));
 
         pendingPreview = new ImageView(this);
         pendingPreview.setScaleType(ImageView.ScaleType.CENTER_CROP);
         pendingPreview.setImageResource(R.drawable.app_icon);
-        previewHolder.addView(pendingPreview, match());
+        pendingPreview.setBackground(rounded(COLOR_SURFACE_2, 10));
+        pendingPreview.setClipToOutline(true);
+        FrameLayout.LayoutParams previewParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(224));
+        previewParams.setMargins(dp(14), dp(14), dp(14), 0);
+        previewHolder.addView(pendingPreview, previewParams);
 
-        pendingPreviewHint = bodyText("Добавить рисунок", 13, COLOR_TEXT);
+        pendingPreviewHint = bodyText("Добавить рисунок", 14, COLOR_TEXT);
         pendingPreviewHint.setGravity(Gravity.CENTER);
-        pendingPreviewHint.setPadding(dp(14), dp(7), dp(14), dp(7));
-        pendingPreviewHint.setBackground(rounded(Color.argb(225, 255, 255, 255), 18));
-        FrameLayout.LayoutParams hintParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38), Gravity.CENTER);
+        FrameLayout.LayoutParams hintParams = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50), Gravity.BOTTOM);
+        hintParams.setMargins(dp(14), 0, dp(14), dp(4));
         previewHolder.addView(pendingPreviewHint, hintParams);
+
+        TextView removeImage = iconText("×", 24);
+        removeImage.setTextColor(Color.WHITE);
+        removeImage.setBackground(rounded(Color.parseColor("#807D79"), 22));
+        FrameLayout.LayoutParams removeParams = new FrameLayout.LayoutParams(dp(38), dp(38), Gravity.TOP | Gravity.END);
+        removeParams.setMargins(0, dp(20), dp(20), 0);
+        previewHolder.addView(removeImage, removeParams);
+        removeImage.setOnClickListener(v -> {
+            pendingImageUri = null;
+            pendingPreview.setImageResource(R.drawable.app_icon);
+        });
         previewHolder.setOnClickListener(v -> showImageSourceDialog());
 
         EditText titleInput = field("");
+        titleInput.setText("Новая работа");
         EditText yearInput = field("");
+        yearInput.setText(String.valueOf(Calendar.getInstance().get(Calendar.YEAR)));
         yearInput.setInputType(InputType.TYPE_CLASS_NUMBER);
-        content.addView(labeledControl("Название", titleInput), labeledParams());
-        content.addView(labeledControl("Год создания", yearInput), labeledParams());
+        content.addView(formField("Название", titleInput), formFieldParams());
+        content.addView(formField("Год создания", yearInput), formFieldParams());
 
-        Button materialButton = secondaryButton(selectedMaterialsLabel());
-        materialButton.setTextColor(COLOR_TEXT);
-        materialButton.setBackground(outlined(Color.TRANSPARENT, COLOR_OUTLINE, 12));
-        materialButton.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
-        materialButton.setPadding(dp(16), 0, dp(16), 0);
-        content.addView(labeledControl("Материал", materialButton), labeledParams());
-        materialButton.setOnClickListener(v -> showMaterialPicker(materialButton));
+        TextView materialLabel = bodyText("Материал", 14, COLOR_TEXT);
+        LinearLayout.LayoutParams materialLabelParams = lpMatchWrap();
+        materialLabelParams.topMargin = dp(14);
+        content.addView(materialLabel, materialLabelParams);
+        HorizontalScrollView materialScroll = new HorizontalScrollView(this);
+        materialScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout materialRow = new LinearLayout(this);
+        materialRow.setOrientation(LinearLayout.HORIZONTAL);
+        materialScroll.addView(materialRow, new HorizontalScrollView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(46)));
+        content.addView(materialScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        renderArtworkMaterialChips(materialRow);
 
         Button save = primaryButton("Сохранить");
-        LinearLayout.LayoutParams saveParams = fieldParams();
-        saveParams.topMargin = dp(18);
+        LinearLayout.LayoutParams saveParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        saveParams.topMargin = dp(14);
         content.addView(save, saveParams);
         save.setOnClickListener(v -> {
             String titleValue = titleInput.getText().toString().trim();
@@ -425,6 +457,27 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void renderArtworkMaterialChips(LinearLayout row) {
+        row.removeAllViews();
+        for (String material : materials) {
+            boolean selected = selectedArtworkMaterials.contains(material);
+            Button option = materialChoiceChip(material, selected);
+            option.setOnClickListener(v -> {
+                selectedArtworkMaterials.clear();
+                selectedArtworkMaterials.add(material);
+                renderArtworkMaterialChips(row);
+            });
+            row.addView(option);
+        }
+        Button add = materialChoiceChip("＋ Добавить", false);
+        add.setOnClickListener(v -> showAddMaterialDialog(material -> {
+            selectedArtworkMaterials.clear();
+            selectedArtworkMaterials.add(material);
+            renderArtworkMaterialChips(row);
+        }));
+        row.addView(add);
+    }
+
     private void chooseImage() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -436,7 +489,7 @@ public class MainActivity extends Activity {
     private void showImageSourceDialog() {
         new AlertDialog.Builder(this)
                 .setTitle("Добавить рисунок")
-                .setItems(new String[]{"Сканировать камерой", "Выбрать из галереи"}, (dialog, which) -> {
+                .setItems(new String[]{"Сканировать рисунок", "Выбрать из галереи"}, (dialog, which) -> {
                     if (which == 0) scanWithCamera();
                     else chooseImage();
                 })
@@ -445,40 +498,61 @@ public class MainActivity extends Activity {
     }
 
     private void scanWithCamera() {
-        File directory = new File(getCacheDir(), "captures");
-        if (!directory.exists() && !directory.mkdirs()) {
-            Toast.makeText(this, "Не удалось подготовить камеру", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        File photo = new File(directory, "scan_" + System.currentTimeMillis() + ".jpg");
-        pendingCameraUri = CaptureFileProvider.uriForFile(this, photo);
-        Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-        intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingCameraUri);
-        intent.setClipData(ClipData.newRawUri("Рисунок", pendingCameraUri));
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-        if (intent.resolveActivity(getPackageManager()) == null) {
-            Toast.makeText(this, "На телефоне не найдено приложение камеры", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        startActivityForResult(intent, REQUEST_CAMERA);
+        GmsDocumentScannerOptions options = new GmsDocumentScannerOptions.Builder()
+                .setGalleryImportAllowed(false)
+                .setPageLimit(1)
+                .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+                .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_BASE)
+                .build();
+        Toast.makeText(this, "Готовим сканер…", Toast.LENGTH_SHORT).show();
+        GmsDocumentScanning.getClient(options).getStartScanIntent(this)
+                .addOnSuccessListener(this, sender -> {
+                    try {
+                        startIntentSenderForResult(sender, REQUEST_DOCUMENT_SCAN, null, 0, 0, 0);
+                    } catch (IntentSender.SendIntentException error) {
+                        showScannerUnavailable();
+                    }
+                })
+                .addOnFailureListener(this, error -> showScannerUnavailable());
+    }
+
+    private void showScannerUnavailable() {
+        new AlertDialog.Builder(this)
+                .setTitle("Сканер пока недоступен")
+                .setMessage("Для первого запуска подключитесь к интернету и проверьте обновления сервисов Google Play. Можно повторить попытку или выбрать готовое фото.")
+                .setNegativeButton("Закрыть", null)
+                .setPositiveButton("Выбрать фото", (dialog, which) -> chooseImage())
+                .show();
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK) return;
-        if (requestCode == REQUEST_IMAGE && data != null && data.getData() != null) {
-            Uri selected = data.getData();
-            int flags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+        if (requestCode == REQUEST_BACKUP_FOLDER && data != null && data.getData() != null) {
             try {
-                getContentResolver().takePersistableUriPermission(selected, flags);
+                DrawingBackup.choose(this, data.getData());
+                Toast.makeText(this, "Ежедневная копия включена", Toast.LENGTH_SHORT).show();
+            } catch (Exception error) {
+                Toast.makeText(this, "Нет доступа к папке. Выберите другую", Toast.LENGTH_LONG).show();
+            }
+            showSettings();
+        } else if (requestCode == REQUEST_IMAGE && data != null && data.getData() != null) {
+            Uri selected = data.getData();
+            try {
+                getContentResolver().takePersistableUriPermission(selected, Intent.FLAG_GRANT_READ_URI_PERMISSION);
             } catch (Exception ignored) {
             }
             editorTargetArtwork = null;
             showImageEditor(selected);
-        } else if (requestCode == REQUEST_CAMERA && pendingCameraUri != null) {
+        } else if (requestCode == REQUEST_DOCUMENT_SCAN) {
+            GmsDocumentScanningResult scanned = GmsDocumentScanningResult.fromActivityResultIntent(data);
+            if (scanned == null || scanned.getPages() == null || scanned.getPages().size() != 1) {
+                Toast.makeText(this, "Не удалось получить снимок. Попробуйте ещё раз", Toast.LENGTH_SHORT).show();
+                return;
+            }
             editorTargetArtwork = null;
-            showImageEditor(pendingCameraUri);
+            showImageEditor(scanned.getPages().get(0).getImageUri());
         }
     }
 
@@ -793,35 +867,29 @@ public class MainActivity extends Activity {
     }
 
     private void showArtworkDetail(Artwork artwork) {
+        currentScreen = "detail";
         FrameLayout root = newPage();
         LinearLayout page = vertical();
-        page.setPadding(dp(18), dp(4), dp(18), dp(24));
+        page.setPadding(dp(18), dp(4), dp(18), dp(12));
         root.addView(page, match());
 
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
         TextView back = iconText("‹", 30);
-        back.setTranslationY(-dp(5));
         back.setOnClickListener(v -> showHome());
-        header.addView(back, new LinearLayout.LayoutParams(dp(48), dp(60)));
-        TextView title = bodyText(artwork.title, 20, COLOR_TEXT);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        title.setSingleLine(true);
-        header.addView(title, new LinearLayout.LayoutParams(0, dp(60), 1));
+        header.addView(back, new LinearLayout.LayoutParams(dp(44), dp(48)));
+        header.addView(new View(this), new LinearLayout.LayoutParams(0, dp(48), 1));
         TextView remove = iconText("⋮", 26);
         remove.setContentDescription("Действия");
         remove.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setItems(new String[]{"Редактировать изображение", "Удалить работу"}, (dialog, which) -> {
-                    if (which == 0) {
-                        editorTargetArtwork = artwork;
-                        showImageEditor(Uri.parse(artwork.uri));
-                    } else {
-                        confirmDelete(artwork);
-                    }
-                })
+                .setItems(new String[]{"Удалить работу"}, (dialog, which) -> confirmDelete(artwork))
                 .show());
-        header.addView(remove, new LinearLayout.LayoutParams(dp(48), dp(60)));
+        header.addView(remove, new LinearLayout.LayoutParams(dp(44), dp(48)));
         page.addView(header, lpMatchWrap());
+
+        TextView title = serifHeading(artwork.title, 27);
+        title.setSingleLine(true);
+        page.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout content = vertical();
@@ -829,14 +897,52 @@ public class MainActivity extends Activity {
         page.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         ImageView image = new ImageView(this);
-        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        image.setBackground(rounded(COLOR_SURFACE_2, 20));
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setBackground(rounded(COLOR_SURFACE_2, 10));
         image.setClipToOutline(true);
         setArtworkImage(image, artwork);
-        content.addView(image, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(360)));
+        content.addView(image, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(372)));
 
-        content.addView(detailRow("Год создания", artwork.year), detailParams());
-        content.addView(detailRow("Материалы", artwork.material), detailParams());
+        View divider = new View(this);
+        divider.setBackgroundColor(COLOR_OUTLINE);
+        LinearLayout.LayoutParams dividerParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+        dividerParams.topMargin = dp(18);
+        content.addView(divider, dividerParams);
+        content.addView(detailLine("Год создания", artwork.year), lpMatchWrap());
+        content.addView(detailLine("Материал", artwork.material), lpMatchWrap());
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.CENTER);
+        ImageView edit = roundAction(R.drawable.ic_action_edit, "Редактировать изображение");
+        edit.setOnClickListener(v -> {
+            editorTargetArtwork = artwork;
+            showImageEditor(Uri.parse(artwork.uri));
+        });
+        actions.addView(edit, new LinearLayout.LayoutParams(dp(58), dp(58)));
+        ImageView share = roundAction(R.drawable.ic_action_share, "Поделиться");
+        share.setOnClickListener(v -> shareArtwork(artwork));
+        LinearLayout.LayoutParams shareParams = new LinearLayout.LayoutParams(dp(58), dp(58));
+        shareParams.leftMargin = dp(46);
+        actions.addView(share, shareParams);
+        page.addView(actions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(76)));
+    }
+
+    private View detailLine(String label, String value) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        TextView left = bodyText(label, 14, COLOR_MUTED);
+        TextView right = bodyText(value, 15, COLOR_TEXT);
+        row.addView(left, new LinearLayout.LayoutParams(dp(126), dp(50)));
+        left.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(right, new LinearLayout.LayoutParams(0, dp(50), 1));
+        right.setGravity(Gravity.CENTER_VERTICAL);
+        View line = new View(this);
+        line.setBackgroundColor(COLOR_OUTLINE);
+        LinearLayout wrapper = vertical();
+        wrapper.addView(row, lpMatchWrap());
+        wrapper.addView(line, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+        return wrapper;
     }
 
     private void confirmDelete(Artwork artwork) {
@@ -852,16 +958,41 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    private void shareArtwork(Artwork artwork) {
+        Bitmap bitmap = decodeBitmap(Uri.parse(artwork.uri), 2000);
+        if (bitmap == null) {
+            Toast.makeText(this, "Не удалось подготовить рисунок", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            File directory = new File(getCacheDir(), "captures");
+            if (!directory.exists() && !directory.mkdirs()) throw new IllegalStateException("directory");
+            File file = new File(directory, "share_" + System.currentTimeMillis() + ".jpg");
+            FileOutputStream output = new FileOutputStream(file);
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 94, output);
+            output.close();
+            Uri uri = CaptureFileProvider.uriForFile(this, file);
+            Intent share = new Intent(Intent.ACTION_SEND);
+            share.setType("image/jpeg");
+            share.putExtra(Intent.EXTRA_STREAM, uri);
+            share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(share, "Поделиться рисунком"));
+        } catch (Exception error) {
+            Toast.makeText(this, "Не удалось поделиться рисунком", Toast.LENGTH_SHORT).show();
+        }
+    }
+
     private void showYears() {
+        currentScreen = "years";
         FrameLayout root = newPage();
         LinearLayout page = vertical();
-        page.setPadding(dp(16), dp(12), dp(16), dp(86));
+        page.setPadding(dp(18), dp(10), dp(18), dp(82));
         root.addView(page, match());
-        page.addView(heading("По годам"), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
+        page.addView(serifHeading("По годам", 28), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout list = vertical();
-        list.setPadding(0, dp(12), 0, dp(18));
+        list.setPadding(0, dp(2), 0, dp(18));
         scroll.addView(list, lpMatchWrap());
         page.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
@@ -880,21 +1011,28 @@ public class MainActivity extends Activity {
             for (Map.Entry<String, List<Artwork>> group : grouped.entrySet()) {
                 LinearLayout yearHeader = new LinearLayout(this);
                 yearHeader.setGravity(Gravity.CENTER_VERTICAL);
-                TextView year = bodyText(group.getKey(), 24, COLOR_TEXT);
-                year.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-                TextView count = bodyText(group.getValue().size() + " работ", 14, COLOR_MUTED);
-                yearHeader.addView(year, new LinearLayout.LayoutParams(0, dp(48), 1));
-                yearHeader.addView(count, lpWrapWrap());
+                TextView year = serifHeading(group.getKey(), 27);
+                TextView count = bodyText(group.getValue().size() + " работ", 13, COLOR_MUTED);
+                count.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+                TextView arrow = iconText("›", 29);
+                yearHeader.addView(year, new LinearLayout.LayoutParams(0, dp(52), 1));
+                yearHeader.addView(count, new LinearLayout.LayoutParams(dp(82), dp(52)));
+                yearHeader.addView(arrow, new LinearLayout.LayoutParams(dp(24), dp(52)));
                 list.addView(yearHeader, lpMatchWrap());
-                HorizontalScrollView stripScroll = new HorizontalScrollView(this);
-                stripScroll.setHorizontalScrollBarEnabled(false);
                 LinearLayout strip = new LinearLayout(this);
                 strip.setOrientation(LinearLayout.HORIZONTAL);
-                stripScroll.addView(strip, new HorizontalScrollView.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-                for (Artwork artwork : group.getValue()) strip.addView(yearThumbnail(artwork));
+                int countShown = Math.min(4, group.getValue().size());
+                for (int i = 0; i < countShown; i++) strip.addView(yearThumbnail(group.getValue().get(i)));
+                for (int i = countShown; i < 4; i++) {
+                    View placeholder = new View(this);
+                    placeholder.setBackground(rounded(COLOR_SURFACE_2, 7));
+                    LinearLayout.LayoutParams placeholderParams = new LinearLayout.LayoutParams(0, dp(108), 1);
+                    if (i > 0) placeholderParams.leftMargin = dp(6);
+                    strip.addView(placeholder, placeholderParams);
+                }
                 LinearLayout.LayoutParams stripParams = lpMatchWrap();
-                stripParams.bottomMargin = dp(20);
-                list.addView(stripScroll, stripParams);
+                stripParams.bottomMargin = dp(22);
+                list.addView(strip, stripParams);
             }
         }
         addBottomNavigation(root, "По годам");
@@ -907,8 +1045,9 @@ public class MainActivity extends Activity {
         image.setBackground(rounded(COLOR_SURFACE_2, 13));
         image.setClipToOutline(true);
         setArtworkImage(image, artwork);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(dp(88), dp(116));
-        params.rightMargin = dp(8);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(108), 1);
+        params.leftMargin = dp(3);
+        params.rightMargin = dp(3);
         image.setLayoutParams(params);
         image.setOnClickListener(v -> showArtworkDetail(artwork));
         return image;
@@ -941,16 +1080,56 @@ public class MainActivity extends Activity {
     }
 
     private void showSettings() {
+        currentScreen = "settings";
         FrameLayout root = newPage();
+
+        ScrollView scroll = new ScrollView(this);
         LinearLayout page = vertical();
         page.setPadding(dp(18), dp(12), dp(18), dp(86));
-        root.addView(page, match());
-        page.addView(heading("Настройки"), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
+        scroll.addView(page, lpMatchWrap());
+        root.addView(scroll, match());
+        page.addView(serifHeading("Настройки", 28), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
+
+        TextView backupSection = bodyText("Ежедневная резервная копия", 14, COLOR_PRIMARY);
+        backupSection.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        LinearLayout.LayoutParams backupSectionParams = lpMatchWrap();
+        backupSectionParams.topMargin = dp(18);
+        page.addView(backupSection, backupSectionParams);
+
+        boolean backupEnabled = DrawingBackup.enabled(this);
+        String backupMessage = backupEnabled
+                ? "Папка: " + DrawingBackup.folderName(this) + "\n" + DrawingBackup.status(this)
+                : "Копия коллекции и рисунков будет создаваться раз в сутки.";
+        TextView backupStatus = bodyText(backupMessage, 14, COLOR_MUTED);
+        backupStatus.setLineSpacing(dp(2), 1f);
+        LinearLayout.LayoutParams backupStatusParams = lpMatchWrap();
+        backupStatusParams.topMargin = dp(9);
+        page.addView(backupStatus, backupStatusParams);
+
+        Button chooseBackup = secondaryButton(backupEnabled ? "Изменить папку" : "Выбрать папку");
+        LinearLayout.LayoutParams chooseBackupParams = fieldParams();
+        chooseBackupParams.topMargin = dp(12);
+        page.addView(chooseBackup, chooseBackupParams);
+        chooseBackup.setOnClickListener(v -> openBackupFolderPicker());
+
+        if (backupEnabled) {
+            Button disableBackup = textButton("Выключить ежедневную копию", false);
+            disableBackup.setTextSize(14);
+            disableBackup.setTextColor(COLOR_TEXT);
+            disableBackup.setBackground(outlined(Color.TRANSPARENT, COLOR_OUTLINE, 25));
+            LinearLayout.LayoutParams disableParams = fieldParams();
+            disableParams.topMargin = dp(8);
+            page.addView(disableBackup, disableParams);
+            disableBackup.setOnClickListener(v -> {
+                DrawingBackup.disable(this);
+                showSettings();
+            });
+        }
 
         TextView section = bodyText("Материалы", 14, COLOR_PRIMARY);
         section.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         LinearLayout.LayoutParams sectionParams = lpMatchWrap();
-        sectionParams.topMargin = dp(18);
+        sectionParams.topMargin = dp(28);
         page.addView(section, sectionParams);
 
         LinearLayout materialList = vertical();
@@ -963,74 +1142,111 @@ public class MainActivity extends Activity {
         page.addView(add, addParams);
         add.setOnClickListener(v -> showAddMaterialDialog(material -> renderMaterialList(materialList)));
 
-        TextView storage = bodyText("Данные хранятся только на этом устройстве. Рисунок можно выбрать из галереи или отсканировать камерой.", 14, COLOR_MUTED);
-        LinearLayout.LayoutParams storageParams = lpMatchWrap();
-        storageParams.topMargin = dp(28);
-        page.addView(storage, storageParams);
-
         addBottomNavigation(root, "Настройки");
+    }
+
+    private void openBackupFolderPicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        startActivityForResult(intent, REQUEST_BACKUP_FOLDER);
     }
 
     private void renderMaterialList(LinearLayout list) {
         list.removeAllViews();
         for (String material : materials) {
-            TextView row = bodyText(material, 16, COLOR_TEXT);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(dp(16), 0, dp(16), 0);
+            row.setPadding(dp(16), 0, dp(7), 0);
             row.setBackground(rounded(COLOR_SURFACE, 14));
+
+            TextView name = bodyText(material, 16, COLOR_TEXT);
+            row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+            TextView remove = iconText("×", 25);
+            remove.setContentDescription("Удалить материал " + material);
+            remove.setTextColor(COLOR_MUTED);
+            remove.setOnClickListener(v -> confirmDeleteMaterial(material, list));
+            row.addView(remove, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
             params.topMargin = dp(8);
             list.addView(row, params);
         }
     }
 
+    private void confirmDeleteMaterial(String material, LinearLayout list) {
+        new AlertDialog.Builder(this)
+                .setTitle("Удалить материал?")
+                .setMessage("«" + material + "» исчезнет из списка. У уже сохранённых работ он останется.")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Удалить", (dialog, which) -> {
+                    materials.remove(material);
+                    selectedMaterialFilters.remove(material);
+                    selectedArtworkMaterials.remove(material);
+                    saveData();
+                    renderMaterialList(list);
+                })
+                .show();
+    }
+
     private void addBottomNavigation(FrameLayout root, String active) {
         LinearLayout nav = new LinearLayout(this);
         nav.setGravity(Gravity.CENTER);
-        nav.setPadding(dp(8), dp(5), dp(8), dp(5));
-        nav.setBackgroundColor(COLOR_SURFACE_2);
+        nav.setPadding(dp(20), dp(8), dp(20), dp(4));
+        nav.setBackgroundColor(COLOR_BG);
 
-        View works = navItem("▦", "Работы", active.equals("Работы"));
-        works.setOnClickListener(v -> showHome());
-        nav.addView(works, navItemParams());
+        boolean collectionActive = active.equals("Коллекция") || active.equals("По годам");
+        View collection = navItem(R.drawable.ic_nav_works, "Коллекция", collectionActive);
+        collection.setOnClickListener(v -> {
+            if (active.equals("Коллекция")) showYears();
+            else showHome();
+        });
+        nav.addView(collection, navItemParams());
 
-        View years = navItem("▣", "По годам", active.equals("По годам"));
-        years.setOnClickListener(v -> showYears());
-        nav.addView(years, navItemParams());
+        nav.addView(new View(this), navItemParams());
 
-        View settings = navItem("⚙", "Настройки", active.equals("Настройки"));
+        View settings = navItem(R.drawable.ic_nav_settings, "Настройки", active.equals("Настройки"));
         settings.setOnClickListener(v -> showSettings());
         nav.addView(settings, navItemParams());
 
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(68), Gravity.BOTTOM);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(78), Gravity.BOTTOM);
         root.addView(nav, params);
     }
 
     private void addFloatingButton(FrameLayout root) {
-        Button add = textButton("＋", false);
-        add.setTextSize(29);
-        add.setTextColor(COLOR_TEXT);
+        ImageView add = new ImageView(this);
+        add.setImageResource(R.drawable.ic_action_add);
+        add.setColorFilter(Color.WHITE);
+        add.setScaleType(ImageView.ScaleType.CENTER);
         add.setContentDescription("Добавить рисунок");
-        add.setBackground(rounded(COLOR_PRIMARY_SOFT, 17));
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        circle.setColor(COLOR_PRIMARY);
+        add.setBackground(circle);
         add.setElevation(dp(7));
         add.setOnClickListener(v -> showAddArtwork());
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.BOTTOM | Gravity.END);
-        params.setMargins(0, 0, dp(19), dp(88));
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(60), dp(60), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        params.setMargins(0, 0, 0, dp(18));
         root.addView(add, params);
     }
 
-    private View navItem(String symbol, String label, boolean active) {
+    private View navItem(int iconResource, String label, boolean active) {
         LinearLayout item = vertical();
         item.setGravity(Gravity.CENTER);
         item.setBackgroundColor(Color.TRANSPARENT);
         item.setClickable(true);
 
-        TextView icon = bodyText(symbol, 17, active ? COLOR_TEXT : COLOR_MUTED);
-        icon.setGravity(Gravity.CENTER);
-        if (active) icon.setBackground(rounded(COLOR_PRIMARY_SOFT, 18));
-        item.addView(icon, new LinearLayout.LayoutParams(dp(58), dp(29)));
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(iconResource);
+        icon.setScaleType(ImageView.ScaleType.CENTER);
+        icon.setColorFilter(active ? COLOR_PRIMARY : COLOR_TEXT);
+        item.addView(icon, new LinearLayout.LayoutParams(dp(42), dp(29)));
 
-        TextView text = bodyText(label, 11, active ? COLOR_TEXT : COLOR_MUTED);
+        TextView text = bodyText(label, 11, active ? COLOR_PRIMARY : COLOR_TEXT);
         text.setGravity(Gravity.CENTER);
         if (active) text.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(20));
@@ -1041,12 +1257,12 @@ public class MainActivity extends Activity {
 
     private Button chip(String label, boolean selected) {
         Button button = textButton(label, false);
-        button.setTextSize(13);
-        button.setTextColor(COLOR_TEXT);
-        button.setPadding(dp(14), 0, dp(14), 0);
-        button.setBackground(selected ? rounded(COLOR_PRIMARY_SOFT, 11) : outlined(Color.TRANSPARENT, COLOR_OUTLINE, 11));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(38));
-        params.rightMargin = dp(8);
+        button.setTextSize(11);
+        button.setTextColor(selected ? Color.WHITE : COLOR_TEXT);
+        button.setPadding(dp(16), 0, dp(16), 0);
+        button.setBackground(selected ? rounded(COLOR_PRIMARY, 18) : rounded(COLOR_SURFACE_2, 18));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36));
+        params.rightMargin = dp(7);
         button.setLayoutParams(params);
         return button;
     }
@@ -1055,13 +1271,13 @@ public class MainActivity extends Activity {
         Button button = textButton(label, false);
         button.setTextColor(Color.WHITE);
         button.setTextSize(16);
-        button.setBackground(rounded(COLOR_PRIMARY, 25));
+        button.setBackground(rounded(COLOR_PRIMARY, 16));
         return button;
     }
 
     private Button secondaryButton(String label) {
         Button button = textButton(label, false);
-        button.setTextColor(COLOR_TEXT);
+        button.setTextColor(Color.WHITE);
         button.setTextSize(15);
         button.setBackground(rounded(COLOR_PRIMARY_SOFT, 25));
         return button;
@@ -1085,8 +1301,45 @@ public class MainActivity extends Activity {
         input.setTextSize(16);
         input.setSingleLine(true);
         input.setPadding(dp(15), 0, dp(15), 0);
-        input.setBackground(outlined(Color.TRANSPARENT, COLOR_OUTLINE, 12));
+        input.setBackground(outlined(Color.TRANSPARENT, COLOR_OUTLINE, 8));
         return input;
+    }
+
+    private View formField(String label, EditText input) {
+        LinearLayout block = vertical();
+        TextView caption = bodyText(label, 14, COLOR_TEXT);
+        caption.setGravity(Gravity.CENTER_VERTICAL);
+        block.addView(caption, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(25)));
+        block.addView(input, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        return block;
+    }
+
+    private LinearLayout.LayoutParams formFieldParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(73));
+        params.topMargin = dp(8);
+        return params;
+    }
+
+    private Button materialChoiceChip(String label, boolean selected) {
+        Button button = textButton(label, false);
+        button.setTextSize(11);
+        button.setTextColor(selected ? Color.WHITE : COLOR_TEXT);
+        button.setPadding(dp(12), 0, dp(12), 0);
+        button.setBackground(selected
+                ? rounded(COLOR_PRIMARY, 18)
+                : outlined(Color.TRANSPARENT, COLOR_OUTLINE, 18));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40));
+        params.rightMargin = dp(7);
+        params.topMargin = dp(3);
+        button.setLayoutParams(params);
+        return button;
+    }
+
+    private TextView serifHeading(String value, int size) {
+        TextView heading = bodyText(value, size, COLOR_TEXT);
+        heading.setTypeface(Typeface.create("Noto Serif", Typeface.BOLD));
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        return heading;
     }
 
     private View labeledControl(String label, View control) {
@@ -1162,6 +1415,26 @@ public class MainActivity extends Activity {
         GradientDrawable drawable = rounded(color, radiusDp);
         drawable.setStroke(dp(1), strokeColor);
         return drawable;
+    }
+
+    private GradientDrawable dashed(int color, int strokeColor, int radiusDp) {
+        GradientDrawable drawable = rounded(color, radiusDp);
+        drawable.setStroke(dp(1), strokeColor, dp(5), dp(4));
+        return drawable;
+    }
+
+    private ImageView roundAction(int iconResource, String description) {
+        ImageView button = new ImageView(this);
+        button.setImageResource(iconResource);
+        button.setColorFilter(COLOR_TEXT);
+        button.setScaleType(ImageView.ScaleType.CENTER);
+        button.setContentDescription(description);
+        button.setClickable(true);
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        circle.setColor(COLOR_SURFACE_2);
+        button.setBackground(circle);
+        return button;
     }
 
     private LinearLayout vertical() {
@@ -1259,25 +1532,24 @@ public class MainActivity extends Activity {
             if (convertView == null) {
                 LinearLayout card = new LinearLayout(context);
                 card.setOrientation(LinearLayout.VERTICAL);
-                card.setBackground(rounded(COLOR_SURFACE, 16));
-                card.setElevation(dp(3));
+                card.setBackground(rounded(COLOR_SURFACE, 10));
+                card.setElevation(dp(1));
                 card.setClipToOutline(true);
-                card.setLayoutParams(new AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210)));
+                card.setLayoutParams(new AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(204)));
 
                 ImageView image = new ImageView(context);
                 image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                card.addView(image, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(142)));
+                card.addView(image, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(154)));
 
                 LinearLayout labels = new LinearLayout(context);
                 labels.setOrientation(LinearLayout.VERTICAL);
-                labels.setPadding(dp(14), dp(11), dp(14), dp(13));
-                TextView title = bodyText("", 15, COLOR_TEXT);
-                title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                labels.setPadding(dp(8), dp(5), dp(8), dp(5));
+                TextView title = bodyText("", 14, COLOR_TEXT);
                 title.setSingleLine(true);
-                TextView sub = bodyText("", 13, COLOR_MUTED);
+                TextView sub = bodyText("", 11, COLOR_MUTED);
                 labels.addView(title, lpMatchWrap());
                 LinearLayout.LayoutParams subParams = lpMatchWrap();
-                subParams.topMargin = dp(5);
+                subParams.topMargin = dp(1);
                 labels.addView(sub, subParams);
                 card.addView(labels, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
@@ -1289,8 +1561,8 @@ public class MainActivity extends Activity {
             }
 
             Artwork artwork = getItem(position);
-            holder.title.setText(artwork.title);
-            holder.sub.setText(artwork.year + " · " + artwork.material);
+            holder.title.setText(artwork.year);
+            holder.sub.setText(artwork.material);
             setArtworkImage(holder.image, artwork);
             return convertView;
         }
