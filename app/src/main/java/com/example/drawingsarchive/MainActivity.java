@@ -95,6 +95,8 @@ public class MainActivity extends ComponentActivity {
     private final ArrayList<String> selectedArtworkMaterials = new ArrayList<>();
     private String searchQuery = "";
     private String currentScreen = "home";
+    private View navigationOverlay;
+    private View navigationDrawerPanel;
 
     private Bitmap editorSourceBitmap;
     private ImageView editorPreview;
@@ -123,6 +125,10 @@ public class MainActivity extends ComponentActivity {
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
+                if (navigationOverlay != null) {
+                    closeNavigationDrawer();
+                    return;
+                }
                 if (!"home".equals(currentScreen)) {
                     showHome();
                     return;
@@ -193,6 +199,8 @@ public class MainActivity extends ComponentActivity {
     }
 
     private FrameLayout newPage() {
+        navigationOverlay = null;
+        navigationDrawerPanel = null;
         pageRoot = new FrameLayout(this);
         pageRoot.setBackgroundColor(COLOR_BG);
         pageRoot.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -217,8 +225,8 @@ public class MainActivity extends ComponentActivity {
         content.setPadding(dp(16), dp(10), dp(16), dp(82));
         root.addView(content, match());
 
-        TextView heading = serifHeading("Мои рисунки", 28);
-        content.addView(heading, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
+        content.addView(topHeading(root, "Мои рисунки", "drawings"),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
 
         EditText search = new EditText(this);
         search.setSingleLine(true);
@@ -372,7 +380,7 @@ public class MainActivity extends ComponentActivity {
         content.addView(previewHolder, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(292)));
 
         pendingPreview = new ImageView(this);
-        pendingPreview.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        pendingPreview.setScaleType(ImageView.ScaleType.FIT_CENTER);
         pendingPreview.setImageResource(R.drawable.app_icon);
         pendingPreview.setBackground(rounded(COLOR_SURFACE_2, 10));
         pendingPreview.setClipToOutline(true);
@@ -487,14 +495,85 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void showImageSourceDialog() {
-        new AlertDialog.Builder(this)
+        LinearLayout choices = vertical();
+        choices.setPadding(dp(18), dp(2), dp(18), dp(4));
+
+        TextView hint = bodyText("Как добавить рисунок?", 14, COLOR_MUTED);
+        LinearLayout.LayoutParams hintParams = lpMatchWrap();
+        hintParams.bottomMargin = dp(14);
+        choices.addView(hint, hintParams);
+
+        View scan = imageSourceOption(
+                R.drawable.ic_source_scan,
+                "Сканировать",
+                "Камера найдёт границы и выровняет рисунок"
+        );
+        choices.addView(scan, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(82)));
+
+        View gallery = imageSourceOption(
+                R.drawable.ic_source_gallery,
+                "Выбрать фото",
+                "Добавить готовое изображение из галереи"
+        );
+        LinearLayout.LayoutParams galleryParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(82));
+        galleryParams.topMargin = dp(10);
+        choices.addView(gallery, galleryParams);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("Добавить рисунок")
-                .setItems(new String[]{"Сканировать рисунок", "Выбрать из галереи"}, (dialog, which) -> {
-                    if (which == 0) scanWithCamera();
-                    else chooseImage();
-                })
+                .setView(choices)
                 .setNegativeButton("Отмена", null)
-                .show();
+                .create();
+        scan.setOnClickListener(v -> {
+            dialog.dismiss();
+            scanWithCamera();
+        });
+        gallery.setOnClickListener(v -> {
+            dialog.dismiss();
+            chooseImage();
+        });
+        dialog.setOnShowListener(ignored -> {
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(COLOR_PRIMARY);
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().setBackgroundDrawable(rounded(COLOR_BG, 24));
+            }
+        });
+        dialog.show();
+    }
+
+    private View imageSourceOption(int iconResource, String title, String description) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(8), dp(12), dp(8));
+        row.setBackground(rounded(COLOR_SURFACE, 17));
+        row.setElevation(dp(1));
+        row.setClickable(true);
+
+        FrameLayout iconHolder = new FrameLayout(this);
+        iconHolder.setBackground(rounded(COLOR_SURFACE_2, 15));
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(iconResource);
+        icon.setScaleType(ImageView.ScaleType.CENTER);
+        iconHolder.addView(icon, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        row.addView(iconHolder, new LinearLayout.LayoutParams(dp(54), dp(54)));
+
+        LinearLayout copy = vertical();
+        copy.setPadding(dp(13), 0, dp(7), 0);
+        TextView name = bodyText(title, 16, COLOR_TEXT);
+        name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        copy.addView(name, lpMatchWrap());
+        TextView detail = bodyText(description, 12, COLOR_MUTED);
+        detail.setMaxLines(2);
+        LinearLayout.LayoutParams detailParams = lpMatchWrap();
+        detailParams.topMargin = dp(3);
+        copy.addView(detail, detailParams);
+        row.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView arrow = bodyText("›", 28, COLOR_PRIMARY);
+        arrow.setGravity(Gravity.CENTER);
+        row.addView(arrow, new LinearLayout.LayoutParams(dp(24), dp(48)));
+        return row;
     }
 
     private void scanWithCamera() {
@@ -897,7 +976,7 @@ public class MainActivity extends ComponentActivity {
         page.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         ImageView image = new ImageView(this);
-        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setBackground(rounded(COLOR_SURFACE_2, 10));
         image.setClipToOutline(true);
         setArtworkImage(image, artwork);
@@ -988,7 +1067,8 @@ public class MainActivity extends ComponentActivity {
         LinearLayout page = vertical();
         page.setPadding(dp(18), dp(10), dp(18), dp(82));
         root.addView(page, match());
-        page.addView(serifHeading("По годам", 28), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
+        page.addView(topHeading(root, "По годам", "drawings"),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout list = vertical();
@@ -1041,7 +1121,7 @@ public class MainActivity extends ComponentActivity {
 
     private View yearThumbnail(Artwork artwork) {
         ImageView image = new ImageView(this);
-        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setBackground(rounded(COLOR_SURFACE_2, 13));
         image.setClipToOutline(true);
         setArtworkImage(image, artwork);
@@ -1062,7 +1142,7 @@ public class MainActivity extends ComponentActivity {
         row.setElevation(dp(2));
 
         ImageView image = new ImageView(this);
-        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setBackground(rounded(COLOR_SURFACE_2, 12));
         image.setClipToOutline(true);
         setArtworkImage(image, artwork);
@@ -1088,13 +1168,22 @@ public class MainActivity extends ComponentActivity {
         page.setPadding(dp(18), dp(12), dp(18), dp(86));
         scroll.addView(page, lpMatchWrap());
         root.addView(scroll, match());
-        page.addView(serifHeading("Настройки", 28), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
+        page.addView(topHeading(root, "Настройки", ""),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
 
-        TextView backupSection = bodyText("Ежедневная резервная копия", 14, COLOR_PRIMARY);
+        LinearLayout backupCard = settingsCard();
+        LinearLayout.LayoutParams backupCardParams = lpMatchWrap();
+        backupCardParams.topMargin = dp(14);
+        page.addView(backupCard, backupCardParams);
+
+        TextView backupSection = bodyText("Резервная копия", 18, COLOR_TEXT);
         backupSection.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        LinearLayout.LayoutParams backupSectionParams = lpMatchWrap();
-        backupSectionParams.topMargin = dp(18);
-        page.addView(backupSection, backupSectionParams);
+        backupCard.addView(backupSection, lpMatchWrap());
+
+        TextView backupFrequency = bodyText("Автоматически раз в сутки", 13, COLOR_PRIMARY);
+        LinearLayout.LayoutParams frequencyParams = lpMatchWrap();
+        frequencyParams.topMargin = dp(3);
+        backupCard.addView(backupFrequency, frequencyParams);
 
         boolean backupEnabled = DrawingBackup.enabled(this);
         String backupMessage = backupEnabled
@@ -1104,12 +1193,12 @@ public class MainActivity extends ComponentActivity {
         backupStatus.setLineSpacing(dp(2), 1f);
         LinearLayout.LayoutParams backupStatusParams = lpMatchWrap();
         backupStatusParams.topMargin = dp(9);
-        page.addView(backupStatus, backupStatusParams);
+        backupCard.addView(backupStatus, backupStatusParams);
 
         Button chooseBackup = secondaryButton(backupEnabled ? "Изменить папку" : "Выбрать папку");
         LinearLayout.LayoutParams chooseBackupParams = fieldParams();
         chooseBackupParams.topMargin = dp(12);
-        page.addView(chooseBackup, chooseBackupParams);
+        backupCard.addView(chooseBackup, chooseBackupParams);
         chooseBackup.setOnClickListener(v -> openBackupFolderPicker());
 
         if (backupEnabled) {
@@ -1119,30 +1208,62 @@ public class MainActivity extends ComponentActivity {
             disableBackup.setBackground(outlined(Color.TRANSPARENT, COLOR_OUTLINE, 25));
             LinearLayout.LayoutParams disableParams = fieldParams();
             disableParams.topMargin = dp(8);
-            page.addView(disableBackup, disableParams);
+            backupCard.addView(disableBackup, disableParams);
             disableBackup.setOnClickListener(v -> {
                 DrawingBackup.disable(this);
                 showSettings();
             });
         }
 
-        TextView section = bodyText("Материалы", 14, COLOR_PRIMARY);
-        section.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        LinearLayout.LayoutParams sectionParams = lpMatchWrap();
-        sectionParams.topMargin = dp(28);
-        page.addView(section, sectionParams);
+        addBottomNavigation(root, "Настройки");
+    }
+
+    private void showMaterials() {
+        currentScreen = "materials";
+        FrameLayout root = newPage();
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout page = vertical();
+        page.setPadding(dp(18), dp(12), dp(18), dp(86));
+        scroll.addView(page, lpMatchWrap());
+        root.addView(scroll, match());
+        page.addView(topHeading(root, "Материалы", "materials"),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(62)));
+
+        LinearLayout materialsCard = settingsCard();
+        LinearLayout.LayoutParams cardParams = lpMatchWrap();
+        cardParams.topMargin = dp(14);
+        page.addView(materialsCard, cardParams);
+
+        TextView title = bodyText("Материалы работ", 18, COLOR_TEXT);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        materialsCard.addView(title, lpMatchWrap());
+        TextView hint = bodyText("Добавляйте и удаляйте варианты для ваших рисунков", 13, COLOR_MUTED);
+        LinearLayout.LayoutParams hintParams = lpMatchWrap();
+        hintParams.topMargin = dp(4);
+        materialsCard.addView(hint, hintParams);
 
         LinearLayout materialList = vertical();
-        page.addView(materialList, lpMatchWrap());
+        LinearLayout.LayoutParams listParams = lpMatchWrap();
+        listParams.topMargin = dp(7);
+        materialsCard.addView(materialList, listParams);
         renderMaterialList(materialList);
 
         Button add = secondaryButton("＋ Добавить материал");
         LinearLayout.LayoutParams addParams = fieldParams();
         addParams.topMargin = dp(12);
-        page.addView(add, addParams);
+        materialsCard.addView(add, addParams);
         add.setOnClickListener(v -> showAddMaterialDialog(material -> renderMaterialList(materialList)));
 
-        addBottomNavigation(root, "Настройки");
+        addBottomNavigation(root, "");
+        addFloatingButton(root);
+    }
+
+    private LinearLayout settingsCard() {
+        LinearLayout card = vertical();
+        card.setPadding(dp(16), dp(17), dp(16), dp(17));
+        card.setBackground(rounded(COLOR_SURFACE, 18));
+        card.setElevation(dp(1));
+        return card;
     }
 
     private void openBackupFolderPicker() {
@@ -1161,7 +1282,7 @@ public class MainActivity extends ComponentActivity {
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(dp(16), 0, dp(7), 0);
-            row.setBackground(rounded(COLOR_SURFACE, 14));
+            row.setBackground(rounded(COLOR_SURFACE_2, 14));
 
             TextView name = bodyText(material, 16, COLOR_TEXT);
             row.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
@@ -1191,6 +1312,118 @@ public class MainActivity extends ComponentActivity {
                     renderMaterialList(list);
                 })
                 .show();
+    }
+
+    private View topHeading(FrameLayout root, String title, String activeSection) {
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+
+        ImageView menu = new ImageView(this);
+        menu.setImageResource(R.drawable.ic_menu);
+        menu.setScaleType(ImageView.ScaleType.CENTER);
+        menu.setContentDescription("Открыть меню");
+        menu.setBackgroundColor(Color.TRANSPARENT);
+        menu.setOnClickListener(v -> openNavigationDrawer(root, activeSection));
+        header.addView(menu, new LinearLayout.LayoutParams(dp(44), dp(52)));
+
+        TextView heading = serifHeading(title, 28);
+        LinearLayout.LayoutParams headingParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1);
+        headingParams.leftMargin = dp(4);
+        header.addView(heading, headingParams);
+        return header;
+    }
+
+    private void openNavigationDrawer(FrameLayout root, String activeSection) {
+        if (navigationOverlay != null) return;
+
+        FrameLayout overlay = new FrameLayout(this);
+        View scrim = new View(this);
+        scrim.setBackgroundColor(Color.parseColor("#59000000"));
+        scrim.setAlpha(0f);
+        overlay.addView(scrim, match());
+
+        LinearLayout drawer = vertical();
+        drawer.setPadding(dp(18), dp(24), dp(18), dp(24));
+        drawer.setBackgroundColor(COLOR_BG);
+        drawer.setElevation(dp(18));
+
+        LinearLayout brand = new LinearLayout(this);
+        brand.setOrientation(LinearLayout.HORIZONTAL);
+        brand.setGravity(Gravity.CENTER_VERTICAL);
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.mipmap.ic_launcher);
+        logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        brand.addView(logo, new LinearLayout.LayoutParams(dp(54), dp(54)));
+        TextView appName = serifHeading("Мои рисунки", 21);
+        LinearLayout.LayoutParams appNameParams = new LinearLayout.LayoutParams(0, dp(54), 1);
+        appNameParams.leftMargin = dp(12);
+        brand.addView(appName, appNameParams);
+        drawer.addView(brand, lpMatchWrap());
+
+        TextView menuLabel = bodyText("ГЛАВНОЕ МЕНЮ", 11, COLOR_MUTED);
+        menuLabel.setLetterSpacing(0.08f);
+        LinearLayout.LayoutParams labelParams = lpMatchWrap();
+        labelParams.topMargin = dp(28);
+        labelParams.bottomMargin = dp(8);
+        labelParams.leftMargin = dp(12);
+        drawer.addView(menuLabel, labelParams);
+
+        View drawings = drawerItem(R.drawable.ic_nav_works, "Рисунки", "drawings".equals(activeSection));
+        drawings.setOnClickListener(v -> showHome());
+        drawer.addView(drawings, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)));
+
+        View materialsItem = drawerItem(R.drawable.ic_nav_materials, "Материалы", "materials".equals(activeSection));
+        materialsItem.setOnClickListener(v -> showMaterials());
+        LinearLayout.LayoutParams materialsParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56));
+        materialsParams.topMargin = dp(4);
+        drawer.addView(materialsItem, materialsParams);
+
+        FrameLayout.LayoutParams drawerParams = new FrameLayout.LayoutParams(dp(304), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START);
+        overlay.addView(drawer, drawerParams);
+        root.addView(overlay, match());
+        navigationOverlay = overlay;
+        navigationDrawerPanel = drawer;
+
+        drawer.setTranslationX(-dp(304));
+        scrim.setOnClickListener(v -> closeNavigationDrawer());
+        scrim.animate().alpha(1f).setDuration(180).start();
+        drawer.animate().translationX(0f).setDuration(220).start();
+    }
+
+    private View drawerItem(int iconResource, String label, boolean active) {
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.HORIZONTAL);
+        item.setGravity(Gravity.CENTER_VERTICAL);
+        item.setPadding(dp(14), 0, dp(14), 0);
+        item.setBackground(active ? rounded(COLOR_SURFACE_2, 15) : rounded(Color.TRANSPARENT, 15));
+        item.setClickable(true);
+
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(iconResource);
+        icon.setColorFilter(active ? COLOR_PRIMARY : COLOR_TEXT);
+        icon.setScaleType(ImageView.ScaleType.CENTER);
+        item.addView(icon, new LinearLayout.LayoutParams(dp(28), dp(42)));
+        TextView text = bodyText(label, 16, active ? COLOR_PRIMARY : COLOR_TEXT);
+        if (active) text.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        LinearLayout.LayoutParams textParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        textParams.leftMargin = dp(13);
+        item.addView(text, textParams);
+        return item;
+    }
+
+    private void closeNavigationDrawer() {
+        View overlay = navigationOverlay;
+        View drawer = navigationDrawerPanel;
+        if (overlay == null || drawer == null) return;
+        navigationOverlay = null;
+        navigationDrawerPanel = null;
+        overlay.animate().alpha(0f).setDuration(170).start();
+        drawer.animate().translationX(-dp(304)).setDuration(190).withEndAction(() -> {
+            if (overlay.getParent() instanceof ViewGroup) {
+                ((ViewGroup) overlay.getParent()).removeView(overlay);
+            }
+        }).start();
     }
 
     private void addBottomNavigation(FrameLayout root, String active) {
@@ -1532,19 +1765,23 @@ public class MainActivity extends ComponentActivity {
             if (convertView == null) {
                 LinearLayout card = new LinearLayout(context);
                 card.setOrientation(LinearLayout.VERTICAL);
-                card.setBackground(rounded(COLOR_SURFACE, 10));
-                card.setElevation(dp(1));
+                card.setBackground(outlined(COLOR_SURFACE, COLOR_OUTLINE, 14));
+                card.setElevation(dp(2));
                 card.setClipToOutline(true);
-                card.setLayoutParams(new AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(204)));
+                card.setLayoutParams(new AbsListView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(212)));
 
                 ImageView image = new ImageView(context);
-                image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                card.addView(image, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(154)));
+                image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                image.setBackground(rounded(COLOR_SURFACE_2, 11));
+                LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(158));
+                imageParams.setMargins(dp(5), dp(5), dp(5), 0);
+                card.addView(image, imageParams);
 
                 LinearLayout labels = new LinearLayout(context);
                 labels.setOrientation(LinearLayout.VERTICAL);
-                labels.setPadding(dp(8), dp(5), dp(8), dp(5));
+                labels.setPadding(dp(10), dp(7), dp(10), dp(6));
                 TextView title = bodyText("", 14, COLOR_TEXT);
+                title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
                 title.setSingleLine(true);
                 TextView sub = bodyText("", 11, COLOR_MUTED);
                 labels.addView(title, lpMatchWrap());
