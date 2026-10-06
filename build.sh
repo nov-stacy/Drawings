@@ -35,6 +35,7 @@ mkdir -p "$COMPILED_DIR" "$GENERATED_DIR" "$CLASSES_DIR" "$DEX_DIR"
   -classpath "$ANDROID_JAR" \
   -d "$CLASSES_DIR" \
   "$GENERATED_DIR/com/example/drawingsarchive/R.java" \
+  "$PROJECT_DIR/app/src/main/java/com/example/drawingsarchive/CaptureFileProvider.java" \
   "$PROJECT_DIR/app/src/main/java/com/example/drawingsarchive/MainActivity.java"
 
 "$JAVA_HOME_LOCAL/bin/jar" cf "$BUILD_DIR/classes.jar" -C "$CLASSES_DIR" .
