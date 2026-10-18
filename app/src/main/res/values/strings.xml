@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Мои рисунки</string>
+    <string name="artwork_position">%1$d / %2$d</string>
 </resources>
