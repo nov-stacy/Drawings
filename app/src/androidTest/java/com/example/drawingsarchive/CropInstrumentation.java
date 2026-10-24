@@ -32,22 +32,34 @@ public final class CropInstrumentation extends Instrumentation {
     private String catalog;
     private boolean layoutOnly;
     private boolean thumbnailsOnly;
+    private boolean photoReplacementOnly;
+    private boolean retouchOnly;
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         layoutOnly = arguments != null && "true".equals(arguments.getString("layoutOnly"));
         thumbnailsOnly = arguments != null && "true".equals(arguments.getString("thumbnailsOnly"));
+        photoReplacementOnly = arguments != null && "true".equals(arguments.getString("photoReplacementOnly"));
+        retouchOnly = arguments != null && "true".equals(arguments.getString("retouchOnly"));
         start();
     }
     @Override public void onStart() {
         Bundle result = new Bundle();
         int resultCode = Activity.RESULT_OK;
         try {
-            if (!layoutOnly && !thumbnailsOnly) { testRenderer(); report("Pixel crop, perspective, rotation: passed"); }
+            if (!layoutOnly && !thumbnailsOnly && !photoReplacementOnly && !retouchOnly) { testRenderer(); report("Pixel crop, perspective, rotation: passed"); }
             Intent intent = new Intent(getTargetContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             activity = (MainActivity) startActivitySync(intent);
             catalog = getTargetContext().getSharedPreferences("drawings_archive", 0).getString("artworks", "[]");
-            if (thumbnailsOnly) {
+            if (retouchOnly) {
+                RetouchChecks.run(this, activity);
+                check(catalog.equals(getTargetContext().getSharedPreferences("drawings_archive", 0).getString("artworks", "[]")), "Retouch tests must not change the catalog");
+                result.putString("stream", "\nRetouch: source mapping, touch, undo/redo, compare, cancel, crop, rotation, perspective, reset, saved pixels and compact layout passed.\n");
+            } else if (photoReplacementOnly) {
+                PhotoReplacementChecks.run(this, activity);
+                check(catalog.equals(getTargetContext().getSharedPreferences("drawings_archive", 0).getString("artworks", "[]")), "Replacement tests must restore the original catalog");
+                result.putString("stream", "\nPhoto replacement: menu, picker/editor cancellation, invalid images, metadata, order, saved pixels and reload passed.\n");
+            } else if (thumbnailsOnly) {
                 ThumbnailChecks.run(this, activity);
                 check(catalog.equals(getTargetContext().getSharedPreferences("drawings_archive", 0).getString("artworks", "[]")), "Thumbnail tests must not change catalog entries");
                 result.putString("stream", "\nThumbnail size, cache, recycling, EXIF orientation, missing files and UI disk reads: passed.\n");

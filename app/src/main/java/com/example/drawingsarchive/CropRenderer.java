@@ -5,8 +5,30 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
+import android.graphics.RectF;
 
 final class CropRenderer {
+    /** Same mapping as apply(), including the translation introduced by Bitmap rotation. */
+    static Matrix sourceToOutput(Bitmap source, CropGeometry geometry) {
+        Matrix rotation = new Matrix();
+        rotation.setRotate(geometry.rotation);
+        RectF bounds = new RectF(0, 0, source.getWidth(), source.getHeight());
+        rotation.mapRect(bounds);
+        rotation.postTranslate(-bounds.left, -bounds.top);
+        if (geometry.isFullImage()) return rotation;
+        float[] from = geometry.points.clone();
+        for (int i = 0; i < 8; i += 2) {
+            from[i] *= bounds.width();
+            from[i + 1] *= bounds.height();
+        }
+        int[] size = geometry.dimensions(source.getWidth(), source.getHeight());
+        float[] to = {0, 0, size[0], 0, size[0], size[1], 0, size[1]};
+        Matrix crop = new Matrix(), result = new Matrix();
+        if (!crop.setPolyToPoly(from, 0, to, 0, 4)) throw new IllegalArgumentException("Invalid crop");
+        result.setConcat(crop, rotation);
+        return result;
+    }
+
     static Bitmap rotated(Bitmap source, int rotation) {
         if (rotation == 0) return source;
         Matrix matrix = new Matrix();

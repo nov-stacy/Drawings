@@ -66,12 +66,11 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.text.Collator;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -108,6 +107,7 @@ public class MainActivity extends ComponentActivity {
     private ThumbnailLoader thumbnailLoader;
     private FrameLayout pageRoot;
     private Uri pendingImageUri;
+    private String pendingImageArtworkId;
     private ImageView pendingPreview;
     private TextView pendingPreviewHint;
     private String pendingTitleDraft = "";
@@ -140,6 +140,8 @@ public class MainActivity extends ComponentActivity {
             });
 
     private Bitmap editorSourceBitmap;
+    private Bitmap editorOriginalBitmap;
+    private ImageRetouchView editorRetouchView;
     private ImageView editorPreview;
     private Bitmap editorGeometryBitmap;
     private CropGeometry editorGeometry;
@@ -167,6 +169,9 @@ public class MainActivity extends ComponentActivity {
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         thumbnailLoader = new ThumbnailLoader(this);
         loadData();
+        if (savedInstanceState != null) {
+            pendingImageArtworkId = savedInstanceState.getString("pending_image_artwork_id");
+        }
         DrawingBackup.schedule(this);
         new Thread(() -> DrawingBackup.writeIfDue(this, () -> false), "drawing-backup-check").start();
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
@@ -188,6 +193,10 @@ public class MainActivity extends ComponentActivity {
                     leaveCropEditor(false);
                     return;
                 }
+                if ("retouch".equals(currentScreen)) {
+                    leaveRetouchEditor(false);
+                    return;
+                }
                 if ("editor".equals(currentScreen)) {
                     cancelImageEditor();
                     return;
@@ -204,6 +213,12 @@ public class MainActivity extends ComponentActivity {
     }
 
     @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        outState.putString("pending_image_artwork_id", pendingImageArtworkId);
+        super.onSaveInstanceState(outState);
+    }
+
+    @Override
     protected void onStart() {
         super.onStart();
         DrawingBackup.prefs(this).registerOnSharedPreferenceChangeListener(backupPreferenceListener);
@@ -217,6 +232,7 @@ public class MainActivity extends ComponentActivity {
 
     @Override
     protected void onDestroy() {
+        if (editorRetouchView != null) editorRetouchView.close();
         if (thumbnailLoader != null) thumbnailLoader.close();
         if (fullscreenArtworkDialog != null) fullscreenArtworkDialog.dismiss();
         if (artworkDialog != null) artworkDialog.dismiss();
@@ -239,6 +255,7 @@ public class MainActivity extends ComponentActivity {
         } catch (Exception ignored) {
         }
 
+        sortMaterials();
         artworks.clear();
         boolean generatedIds = false;
         try {
@@ -261,10 +278,13 @@ public class MainActivity extends ComponentActivity {
             }
         } catch (Exception ignored) {
         }
+        ArtworkOrder.sortByYear(artworks, artwork -> artwork.year);
         if (generatedIds) saveData();
     }
 
     private void saveData() {
+        ArtworkOrder.sortByYear(artworks, artwork -> artwork.year);
+        sortMaterials();
         JSONArray artworkArray = new JSONArray();
         for (Artwork artwork : artworks) {
             JSONObject item = new JSONObject();
@@ -288,6 +308,12 @@ public class MainActivity extends ComponentActivity {
                 .putString(KEY_ARTWORKS, artworkArray.toString())
                 .putString(KEY_MATERIALS_FULL, materialArray.toString())
                 .apply();
+    }
+
+    private void sortMaterials() {
+        Collator collator = Collator.getInstance(new Locale("ru", "RU"));
+        collator.setStrength(Collator.SECONDARY);
+        materials.sort(collator);
     }
 
     private FrameLayout newPage() {
@@ -423,10 +449,8 @@ public class MainActivity extends ComponentActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END));
 
         final Artwork[] draggedArtwork = {null};
-        final int[] lastDragPosition = {-1};
         grid.setOnItemLongClickListener((parent, view, position, id) -> {
             draggedArtwork[0] = visibleArtworks.get(position);
-            lastDragPosition[0] = position;
             ClipData data = ClipData.newPlainText("artwork", draggedArtwork[0].title);
             view.startDragAndDrop(data, new View.DragShadowBuilder(view), draggedArtwork[0], 0);
             return true;
@@ -434,30 +458,22 @@ public class MainActivity extends ComponentActivity {
         grid.setOnDragListener((view, event) -> {
             if (event.getAction() == android.view.DragEvent.ACTION_DRAG_LOCATION) {
                 int targetPosition = grid.pointToPosition((int) event.getX(), (int) event.getY());
-                if (draggedArtwork[0] != null
-                        && targetPosition != GridView.INVALID_POSITION
-                        && targetPosition != lastDragPosition[0]) {
-                    visibleArtworks.remove(draggedArtwork[0]);
-                    int safeTarget = Math.min(targetPosition, visibleArtworks.size());
-                    visibleArtworks.add(safeTarget, draggedArtwork[0]);
-                    lastDragPosition[0] = safeTarget;
-                    syncArtworkOrderFromVisible();
+                if (draggedArtwork[0] != null && ArtworkOrder.moveWithinYear(
+                        artworks, visibleArtworks, draggedArtwork[0], targetPosition,
+                        artwork -> artwork.year)) {
                     artworkAdapter.notifyDataSetChanged();
                 }
                 return true;
             }
             if (event.getAction() == android.view.DragEvent.ACTION_DROP) {
-                syncArtworkOrderFromVisible();
                 saveData();
                 return true;
             }
             if (event.getAction() == android.view.DragEvent.ACTION_DRAG_ENDED) {
                 if (draggedArtwork[0] != null) {
-                    syncArtworkOrderFromVisible();
                     saveData();
                 }
                 draggedArtwork[0] = null;
-                lastDragPosition[0] = -1;
                 return true;
             }
             return true;
@@ -556,18 +572,6 @@ public class MainActivity extends ComponentActivity {
         }
     }
 
-    private void syncArtworkOrderFromVisible() {
-        if (visibleArtworks.isEmpty()) return;
-        ArrayList<Integer> visiblePositions = new ArrayList<>();
-        for (int i = 0; i < artworks.size(); i++) {
-            if (visibleArtworks.contains(artworks.get(i))) visiblePositions.add(i);
-        }
-        int count = Math.min(visiblePositions.size(), visibleArtworks.size());
-        for (int i = 0; i < count; i++) {
-            artworks.set(visiblePositions.get(i), visibleArtworks.get(i));
-        }
-    }
-
     private String materialFilterLabel() {
         if (selectedMaterialFilters.isEmpty()) return "Материалы: все";
         if (selectedMaterialFilters.size() == 1) return "Материалы: " + selectedMaterialFilters.get(0);
@@ -645,6 +649,7 @@ public class MainActivity extends ComponentActivity {
                     "Заменить фото", v -> showImageSourceDialog()), lpMatchWrap());
         }
         EditText titleInput = designField("Введите название");
+        titleInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         titleInput.setText(pendingTitleDraft);
         EditText yearInput = designField("");
         yearInput.setText(pendingYearDraft);
@@ -684,8 +689,10 @@ public class MainActivity extends ComponentActivity {
                 Toast.makeText(this, "Выберите материал", Toast.LENGTH_SHORT).show();
                 return;
             }
-            artworks.add(0, new Artwork(UUID.randomUUID().toString(), titleValue, yearValue,
-                    selectedArtworkMaterials.get(0), pendingImageUri.toString()));
+            ArtworkOrder.putFirstInYear(artworks,
+                    new Artwork(UUID.randomUUID().toString(), titleValue, yearValue,
+                            selectedArtworkMaterials.get(0), pendingImageUri.toString()),
+                    artwork -> artwork.year);
             saveData();
             Toast.makeText(this, "Работа сохранена", Toast.LENGTH_SHORT).show();
             showHome();
@@ -713,18 +720,27 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void chooseImage() {
+        chooseImage(null);
+    }
+
+    private void chooseImage(Artwork target) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("image/*");
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        pendingImageArtworkId = target == null ? null : target.id;
         startActivityForResult(intent, REQUEST_IMAGE);
     }
 
     private void showImageSourceDialog() {
+        showImageSourceDialog(null);
+    }
+
+    private void showImageSourceDialog(Artwork target) {
         LinearLayout choices = vertical();
         choices.setPadding(dp(18), dp(2), dp(18), dp(4));
 
-        TextView hint = bodyText("Как добавить рисунок?", 14, COLOR_MUTED);
+        TextView hint = bodyText(target == null ? "Как добавить рисунок?" : "Выберите новое фото работы", 14, COLOR_MUTED);
         LinearLayout.LayoutParams hintParams = lpMatchWrap();
         hintParams.bottomMargin = dp(14);
         choices.addView(hint, hintParams);
@@ -746,17 +762,17 @@ public class MainActivity extends ComponentActivity {
         choices.addView(gallery, galleryParams);
 
         AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Добавить рисунок")
+                .setTitle(target == null ? "Добавить рисунок" : "Заменить фото")
                 .setView(choices)
                 .setNegativeButton("Отмена", null)
                 .create();
         scan.setOnClickListener(v -> {
             dialog.dismiss();
-            scanWithCamera();
+            scanWithCamera(target);
         });
         gallery.setOnClickListener(v -> {
             dialog.dismiss();
-            chooseImage();
+            chooseImage(target);
         });
         dialog.setOnShowListener(ignored -> {
             dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(COLOR_PRIMARY);
@@ -803,6 +819,10 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void scanWithCamera() {
+        scanWithCamera(null);
+    }
+
+    private void scanWithCamera(Artwork target) {
         GmsDocumentScannerOptions options = new GmsDocumentScannerOptions.Builder()
                 .setGalleryImportAllowed(false)
                 .setPageLimit(1)
@@ -813,26 +833,33 @@ public class MainActivity extends ComponentActivity {
         GmsDocumentScanning.getClient(options).getStartScanIntent(this)
                 .addOnSuccessListener(this, sender -> {
                     try {
+                        pendingImageArtworkId = target == null ? null : target.id;
                         startIntentSenderForResult(sender, REQUEST_DOCUMENT_SCAN, null, 0, 0, 0);
                     } catch (IntentSender.SendIntentException error) {
-                        showScannerUnavailable();
+                        pendingImageArtworkId = null;
+                        showScannerUnavailable(target);
                     }
                 })
-                .addOnFailureListener(this, error -> showScannerUnavailable());
+                .addOnFailureListener(this, error -> showScannerUnavailable(target));
     }
 
-    private void showScannerUnavailable() {
+    private void showScannerUnavailable(Artwork target) {
         new AlertDialog.Builder(this)
                 .setTitle("Сканер пока недоступен")
                 .setMessage("Для первого запуска подключитесь к интернету и проверьте обновления сервисов Google Play. Можно повторить попытку или выбрать готовое фото.")
                 .setNegativeButton("Закрыть", null)
-                .setPositiveButton("Выбрать фото", (dialog, which) -> chooseImage())
+                .setPositiveButton("Выбрать фото", (dialog, which) -> chooseImage(target))
                 .show();
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        String targetId = null;
+        if (requestCode == REQUEST_IMAGE || requestCode == REQUEST_DOCUMENT_SCAN) {
+            targetId = pendingImageArtworkId;
+            pendingImageArtworkId = null;
+        }
         if (resultCode != RESULT_OK) return;
         if (requestCode == REQUEST_BACKUP_FOLDER && data != null && data.getData() != null) {
             try {
@@ -852,17 +879,33 @@ public class MainActivity extends ComponentActivity {
                 getContentResolver().takePersistableUriPermission(selected, Intent.FLAG_GRANT_READ_URI_PERMISSION);
             } catch (Exception ignored) {
             }
-            editorTargetArtwork = null;
-            showImageEditor(selected);
+            editSelectedImage(selected, targetId);
         } else if (requestCode == REQUEST_DOCUMENT_SCAN) {
             GmsDocumentScanningResult scanned = GmsDocumentScanningResult.fromActivityResultIntent(data);
             if (scanned == null || scanned.getPages() == null || scanned.getPages().size() != 1) {
                 Toast.makeText(this, "Не удалось получить снимок. Попробуйте ещё раз", Toast.LENGTH_SHORT).show();
                 return;
             }
-            editorTargetArtwork = null;
-            showImageEditor(scanned.getPages().get(0).getImageUri());
+            editSelectedImage(scanned.getPages().get(0).getImageUri(), targetId);
         }
+    }
+
+    private void editSelectedImage(Uri source, String targetId) {
+        editorTargetArtwork = null;
+        if (targetId != null) {
+            for (Artwork artwork : artworks) {
+                if (artwork.id.equals(targetId)) {
+                    editorTargetArtwork = artwork;
+                    break;
+                }
+            }
+            if (editorTargetArtwork == null) {
+                Toast.makeText(this, "Работа больше недоступна", Toast.LENGTH_SHORT).show();
+                return;
+            }
+        }
+        showImageEditor(source, true);
+        if (!"editor".equals(currentScreen)) editorTargetArtwork = null;
     }
 
     private void showMaterialPicker(Button target) {
@@ -907,12 +950,17 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void showImageEditor(Uri sourceUri) {
+        showImageEditor(sourceUri, editorTargetArtwork == null);
+    }
+
+    private void showImageEditor(Uri sourceUri, boolean imageMode) {
         Bitmap decoded = decodeBitmap(sourceUri, 2400);
         if (decoded == null) {
             Toast.makeText(this, "Не удалось открыть изображение", Toast.LENGTH_SHORT).show();
             return;
         }
         editorSourceBitmap = decoded;
+        editorOriginalBitmap = decoded;
         editorGeometry = new CropGeometry();
         editorGeometryBitmap = null;
         editorCropDraft = null;
@@ -925,8 +973,8 @@ public class MainActivity extends ComponentActivity {
         editorMaterialDraft.clear();
         if (editorTargetArtwork == null) editorMaterialDraft.addAll(selectedArtworkMaterials);
         else editorMaterialDraft.addAll(editorTargetArtwork.materialList());
-        keepSingleMaterial(editorMaterialDraft);
-        showEditorScreen(editorTargetArtwork == null);
+        if (editorTargetArtwork == null) keepSingleMaterial(editorMaterialDraft);
+        showEditorScreen(imageMode);
     }
 
     // Presentation shared only by the editor and its crop screen.
@@ -968,6 +1016,19 @@ public class MainActivity extends ComponentActivity {
     private Button editorOutlineButton(String label) {
         Button button = editorBaseButton(label);
         button.setBackground(outlined(COLOR_SURFACE, EDITOR_OUTLINE, 13));
+        return button;
+    }
+
+    private Button editorToolButton(String label, int resource) {
+        Button button = editorOutlineButton(label);
+        button.setTextSize(12);
+        button.setSingleLine(true);
+        button.setPadding(dp(4), 0, dp(4), 0);
+        android.graphics.drawable.Drawable icon = getDrawable(resource).mutate();
+        icon.setTint(EDITOR_TEXT);
+        icon.setBounds(0, 0, dp(14), dp(14));
+        button.setCompoundDrawablePadding(dp(4));
+        button.setCompoundDrawablesRelative(icon, null, null, null);
         return button;
     }
 
@@ -1130,20 +1191,27 @@ public class MainActivity extends ComponentActivity {
         LinearLayout.LayoutParams geometryParams = lpMatchWrap();
         geometryParams.topMargin = dp(12);
         content.addView(geometry, geometryParams);
-        Button crop = editorOutlineButton(editorGeometry.isFullImage() ? "Обрезать" : "Изменить кадр");
-        designButtonIcon(crop, R.drawable.ic_design_crop, EDITOR_TEXT);
-        geometry.addView(crop, new LinearLayout.LayoutParams(0, dp(48), 1));
+        Button crop = editorToolButton("Обрезать", R.drawable.ic_design_crop);
+        geometry.addView(crop, new LinearLayout.LayoutParams(0, dp(44), 1));
         crop.setOnClickListener(v -> showCropEditor());
-        Button rotate = editorOutlineButton("Повернуть");
-        designButtonIcon(rotate, R.drawable.ic_design_rotate, EDITOR_TEXT);
-        LinearLayout.LayoutParams rotateParams = new LinearLayout.LayoutParams(0, dp(48), 1);
-        rotateParams.leftMargin = dp(9);
+        Button rotate = editorToolButton("Повернуть", R.drawable.ic_design_rotate);
+        LinearLayout.LayoutParams rotateParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        rotateParams.leftMargin = dp(6);
         geometry.addView(rotate, rotateParams);
         rotate.setOnClickListener(v -> {
             editorGeometry.rotateClockwise();
             editorGeometryBitmap = null;
             refreshEditorPreview();
         });
+        Button erase = editorToolButton("Ластик", R.drawable.ic_design_eraser);
+        erase.setTextColor(EDITOR_ACCENT);
+        erase.getCompoundDrawablesRelative()[0].setTint(EDITOR_ACCENT);
+        erase.setBackground(outlined(COLOR_SURFACE, EDITOR_ACCENT, 13));
+        erase.setContentDescription("Магический ластик");
+        LinearLayout.LayoutParams eraseParams = new LinearLayout.LayoutParams(0, dp(44), 1);
+        eraseParams.leftMargin = dp(6);
+        geometry.addView(erase, eraseParams);
+        erase.setOnClickListener(v -> showRetouchEditor());
         TextView filtersTitle = bodyText("Фильтр", 14, EDITOR_TEXT);
         LinearLayout.LayoutParams filtersTitleParams = lpMatchWrap();
         filtersTitleParams.topMargin = dp(24);
@@ -1151,7 +1219,7 @@ public class MainActivity extends ComponentActivity {
         content.addView(filtersTitle, filtersTitleParams);
         LinearLayout filters = new LinearLayout(this);
         filters.setBaselineAligned(false);
-        filters.setPadding(dp(4), dp(4), dp(4), dp(4));
+        filters.setPadding(dp(3), dp(3), dp(3), dp(3));
         filters.setBackground(rounded(EDITOR_SOFT, 13));
         String[] filterNames = {"Оригинал", "Ч/б", "Тёплый"};
         for (int i = 0; i < filterNames.length; i++) {
@@ -1160,7 +1228,7 @@ public class MainActivity extends ComponentActivity {
             filter.setPadding(dp(7), 0, dp(7), 0);
             filter.setSelected(editorFilter == i);
             filter.setContentDescription(filterNames[i] + (editorFilter == i ? ", выбран" : ", не выбран"));
-            LinearLayout.LayoutParams filterParams = new LinearLayout.LayoutParams(0, dp(40), 1);
+            LinearLayout.LayoutParams filterParams = new LinearLayout.LayoutParams(0, dp(32), 1);
             if (i > 0) filterParams.leftMargin = dp(3);
             filters.addView(filter, filterParams);
             filter.setOnClickListener(v -> { editorFilter = mode; renderImageEditorPanelReplacing(panel); });
@@ -1203,6 +1271,7 @@ public class MainActivity extends ComponentActivity {
             editorContrast = 1f;
             editorFilter = 0;
             editorGeometry = new CropGeometry();
+            editorSourceBitmap = editorOriginalBitmap;
             editorGeometryBitmap = null;
             renderImageEditorPanelReplacing(panel);
         });
@@ -1215,6 +1284,140 @@ public class MainActivity extends ComponentActivity {
     private void renderImageEditorPanelReplacing(FrameLayout panel) {
         panel.removeAllViews();
         renderImageEditorPanel(panel);
+    }
+
+    private void showRetouchEditor() {
+        ImageRetouchView view;
+        try {
+            view = new ImageRetouchView(this, editorSourceBitmap, editorGeometry,
+                    new ColorMatrixColorFilter(editorColorMatrix()));
+        } catch (RuntimeException | OutOfMemoryError error) {
+            Toast.makeText(this, "Не удалось открыть ластик. Попробуйте фото поменьше.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        editorPreview = null;
+        editorGeometryBitmap = null;
+        editorRetouchView = view;
+        currentScreen = "retouch";
+        FrameLayout root = newPage();
+        LinearLayout page = vertical();
+        page.setPadding(dp(20), dp(8), dp(20), dp(8));
+        root.addView(page, match());
+        LinearLayout header = editorPageHeader("Магический ластик", "Назад в редактор", v -> leaveRetouchEditor(false));
+        ((TextView) header.getChildAt(1)).setTextSize(22);
+        LinearLayout.LayoutParams headerParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(49));
+        headerParams.bottomMargin = dp(15);
+        page.addView(header, headerParams);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        LinearLayout body = vertical();
+        scroll.addView(body, lpMatchWrap());
+        page.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+        LinearLayout modes = new LinearLayout(this);
+        modes.setBaselineAligned(false);
+        modes.setPadding(dp(4), dp(4), dp(4), dp(4));
+        modes.setBackground(rounded(EDITOR_SOFT, 13));
+        Button brush = editorSegmentButton("Ластик", true);
+        Button move = editorSegmentButton("Перемещение", false);
+        modes.addView(brush, new LinearLayout.LayoutParams(0, dp(40), 1));
+        modes.addView(move, new LinearLayout.LayoutParams(0, dp(40), 1));
+        body.addView(modes, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+
+        view.setBackground(rounded(EDITOR_SOFT, 17));
+        view.setClipToOutline(true);
+        view.setMinimumHeight(dp(220));
+        LinearLayout.LayoutParams photoParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1);
+        photoParams.topMargin = dp(16);
+        photoParams.bottomMargin = dp(12);
+        body.addView(view, photoParams);
+
+        LinearLayout history = new LinearLayout(this);
+        history.setBaselineAligned(false);
+        Button undo = editorOutlineButton("Отменить");
+        Button redo = editorOutlineButton("Повторить");
+        Button compare = editorOutlineButton("До / после");
+        for (Button button : new Button[]{undo, redo, compare}) {
+            button.setTextSize(12); button.setPadding(dp(4), 0, dp(4), 0);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(44), 1);
+            if (button != undo) params.leftMargin = dp(6);
+            history.addView(button, params);
+        }
+        undo.setOnClickListener(v -> view.undo());
+        redo.setOnClickListener(v -> view.redo());
+        compare.setOnClickListener(v -> view.setBefore(!view.isBefore()));
+        body.addView(history, lpMatchWrap());
+
+        TextView brushValue = editorAdjustmentHeader(body, "Размер кисти", 24);
+        brushValue.setText("24");
+        SeekBar brushSize = editorSeekBar();
+        brushSize.setMax(52); brushSize.setProgress(16);
+        brushSize.setContentDescription("Размер кисти ластика");
+        body.addView(brushSize, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)));
+        brushSize.setOnSeekBarChangeListener(new SimpleSeekListener() {
+            @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                brushValue.setText(String.valueOf(progress + 8)); view.setBrushSize(progress + 8);
+            }
+        });
+        TextView zoomValue = editorAdjustmentHeader(body, "Приближение", 1);
+        zoomValue.setText("1,0×");
+        SeekBar zoom = editorSeekBar();
+        zoom.setMax(200); zoom.setProgress(0);
+        zoom.setContentDescription("Приближение для точной ретуши");
+        body.addView(zoom, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(32)));
+        zoom.setOnSeekBarChangeListener(new SimpleSeekListener() {
+            @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                if (fromUser) view.setZoom(1 + progress / 100f);
+            }
+        });
+        TextView hint = bodyText("Проведите по небольшому пятну, чтобы убрать его.", 12, EDITOR_MUTED);
+        hint.setMinLines(2); hint.setMaxLines(2);
+        LinearLayout.LayoutParams hintParams = lpMatchWrap();
+        hintParams.topMargin = dp(12);
+        body.addView(hint, hintParams);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setBaselineAligned(false);
+        Button cancel = editorOutlineButton("Отмена");
+        cancel.setOnClickListener(v -> leaveRetouchEditor(false));
+        actions.addView(cancel, new LinearLayout.LayoutParams(0, dp(48), 1));
+        Button apply = editorPrimaryButton("Применить");
+        apply.setOnClickListener(v -> leaveRetouchEditor(true));
+        LinearLayout.LayoutParams applyParams = new LinearLayout.LayoutParams(0, dp(48), 1);
+        applyParams.leftMargin = dp(9);
+        actions.addView(apply, applyParams);
+        LinearLayout.LayoutParams actionsParams = lpMatchWrap();
+        actionsParams.topMargin = dp(16);
+        page.addView(actions, actionsParams);
+        Runnable refresh = () -> {
+            boolean available = !view.isBusy();
+            undo.setEnabled(view.canUndo()); redo.setEnabled(view.canRedo());
+            undo.setAlpha(view.canUndo() ? 1 : .4f); redo.setAlpha(view.canRedo() ? 1 : .4f);
+            apply.setEnabled(available); apply.setAlpha(available ? 1 : .5f);
+            brush.setEnabled(available); move.setEnabled(available); compare.setEnabled(available);
+            brushSize.setEnabled(available); zoom.setEnabled(available);
+            compare.setText(view.isBefore() ? "После" : "До / после");
+            compare.setSelected(view.isBefore());
+            hint.setText(view.isBusy() ? "Убираем пятно…" : view.isBefore() ? "Оригинал до ретуши. Нажмите «После» для сравнения."
+                    : move.isSelected() ? "Перемещайте фото. Двумя пальцами можно приблизить детали."
+                    : "Проведите по небольшому пятну, чтобы убрать его.");
+            zoomValue.setText(String.format(Locale.getDefault(), "%.1f×", view.getZoom()));
+            zoom.setProgress(Math.round((view.getZoom() - 1) * 100));
+        };
+        view.setOnChangeListener(refresh);
+        brush.setOnClickListener(v -> { view.setMoving(false); styleEditorSegment(brush, true); styleEditorSegment(move, false); refresh.run(); });
+        move.setOnClickListener(v -> { view.setMoving(true); styleEditorSegment(brush, false); styleEditorSegment(move, true); refresh.run(); });
+        refresh.run();
+    }
+
+    private void leaveRetouchEditor(boolean apply) {
+        if (editorRetouchView == null) return;
+        if (apply && editorRetouchView.isBusy()) return;
+        if (apply) { editorSourceBitmap = editorRetouchView.takeResult(); editorGeometryBitmap = null; }
+        editorRetouchView.close();
+        editorRetouchView = null;
+        showEditorScreen(true);
     }
 
     private void showCropEditor() {
@@ -1417,6 +1620,7 @@ public class MainActivity extends ComponentActivity {
         summary.addView(summaryText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         content.addView(summary, lpMatchWrap());
         EditText title = editorInfoField("Введите название");
+        title.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         title.setText(editorTitleDraft);
         title.addTextChangedListener(new DraftTextWatcher(value -> editorTitleDraft = value));
         content.addView(editorFormField("Название", title), editorFormParams());
@@ -1450,8 +1654,11 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void clearEditorState() {
+        if (editorRetouchView != null) editorRetouchView.close();
+        editorRetouchView = null;
         editorPreview = null;
         editorSourceBitmap = null;
+        editorOriginalBitmap = null;
         editorGeometryBitmap = null;
         editorGeometry = null;
         editorCropDraft = null;
@@ -1534,10 +1741,13 @@ public class MainActivity extends ComponentActivity {
             stream.close();
             pendingImageUri = Uri.fromFile(result);
             if (editorTargetArtwork != null) {
+                boolean yearChanged = !editorTargetArtwork.year.equals(cleanYear);
                 editorTargetArtwork.title = cleanTitle;
                 editorTargetArtwork.year = cleanYear;
                 editorTargetArtwork.material = joinMaterials(editorMaterialDraft);
                 editorTargetArtwork.uri = pendingImageUri.toString();
+                if (yearChanged) ArtworkOrder.putFirstInYear(artworks, editorTargetArtwork,
+                        artwork -> artwork.year);
                 saveData();
                 Artwork updated = editorTargetArtwork;
                 clearEditorState();
@@ -2168,6 +2378,10 @@ public class MainActivity extends ComponentActivity {
             showImageEditor(Uri.parse(target.uri));
             if (!"editor".equals(currentScreen)) editorTargetArtwork = null;
         }), lpMatchWrap());
+        content.addView(artworkActionItem("Заменить фото", R.drawable.ic_source_gallery, COLOR_TEXT, () -> {
+            menu.dismiss();
+            showImageSourceDialog(target);
+        }), lpMatchWrap());
         content.addView(artworkActionItem("Поделиться", R.drawable.ic_menu_share, COLOR_TEXT, () -> {
             menu.dismiss();
             shareArtwork(target);
@@ -2387,10 +2601,8 @@ public class MainActivity extends ComponentActivity {
             empty.setGravity(Gravity.CENTER);
             list.addView(empty, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(300)));
         } else {
-            ArrayList<Artwork> sorted = new ArrayList<>(artworks);
-            Collections.sort(sorted, (left, right) -> right.year.compareTo(left.year));
             Map<String, List<Artwork>> grouped = new LinkedHashMap<>();
-            for (Artwork artwork : sorted) {
+            for (Artwork artwork : artworks) {
                 if (!grouped.containsKey(artwork.year)) grouped.put(artwork.year, new ArrayList<>());
                 grouped.get(artwork.year).add(artwork);
             }
